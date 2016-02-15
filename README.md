@@ -1,10 +1,12 @@
-# blender
-RPG fork of Blender
-
 This patch add a new omnidirectional camera model in Blender, allowing it to render images according to the [omnidirectional camera model](https://sites.google.com/site/scarabotix/ocamcalib-toolbox)
 
-![Example render](render_catadioptric.png?raw=true "Example render")
-![Screenshot GUI](screenshot.png?raw=true "Screenshot GUI")
+<table>
+<tr>
+ <td><img src="render_catadioptric.png" width="400"></td>
+ <td><img src="render_fisheye.png" width="400"></td>
+</tr>
+</table>
+
 # Building
 
 Follow the instructions on the [Blender Wiki](http://wiki.blender.org/index.php/Dev:Doc/Building_Blender/Linux/Ubuntu/CMake) to compile Blender.
@@ -25,6 +27,8 @@ Tip: if you don't need OpenCollada nor OSL, you can skip them in the external de
 * Render your image normally (both CPU and GPU rendering are supported)
 
 ## Omnidirectional camera parameters
+
+<img src="screenshot.png" width="800">
 
 * *Polynomial*: a0, a1, a2, a3, a4, a5 correspond to the polynomial backward projection function parameters (in increasing degree order)
 * *Shift*: projection center shift from the image center, in pixels

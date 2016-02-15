@@ -1,0 +1,508 @@
+From f77e918490e6e404f98212db7a846121bcaa9d8d Mon Sep 17 00:00:00 2001
+From: Henri Rebecq <h.rebecq@gmail.com>
+Date: Wed, 23 Sep 2015 08:43:39 +0200
+Subject: [PATCH] Add omnidirectional camera model to Cycles rendering engine
+
+---
+ intern/cycles/app/cycles_xml.cpp                   |   2 +
+ intern/cycles/blender/addon/properties.py          |  56 +++++++++
+ intern/cycles/blender/blender_camera.cpp           |  37 ++++++
+ intern/cycles/kernel/kernel_projection.h           | 126 +++++++++++++++++----
+ intern/cycles/kernel/kernel_types.h                |  14 ++-
+ intern/cycles/render/camera.cpp                    |  24 +++-
+ intern/cycles/render/camera.h                      |  11 ++
+ release/scripts/addons                             |   2 +-
+ release/scripts/addons_contrib                     |   2 +-
+ .../startup/bl_ui/properties_data_camera.py        |  32 +++++-
+ 10 files changed, 273 insertions(+), 33 deletions(-)
+
+diff --git a/intern/cycles/app/cycles_xml.cpp b/intern/cycles/app/cycles_xml.cpp
+index edea8cd..acb446d 100644
+--- a/intern/cycles/app/cycles_xml.cpp
++++ b/intern/cycles/app/cycles_xml.cpp
+@@ -355,6 +355,8 @@ static void xml_read_camera(const XMLReadState& state, pugi::xml_node node)
+ 		cam->panorama_type = PANORAMA_FISHEYE_EQUIDISTANT;
+ 	else if(xml_equal_string(node, "panorama_type", "fisheye_equisolid"))
+ 		cam->panorama_type = PANORAMA_FISHEYE_EQUISOLID;
++	else if(xml_equal_string(node, "panorama_type", "omni"))
++	  cam->panorama_type = PANORAMA_OMNI;
+ 
+ 	xml_read_float(&cam->fisheye_fov, node, "fisheye_fov");
+ 	xml_read_float(&cam->fisheye_lens, node, "fisheye_lens");
+diff --git a/intern/cycles/blender/addon/properties.py b/intern/cycles/blender/addon/properties.py
+index 3417435..3b479d9 100644
+--- a/intern/cycles/blender/addon/properties.py
++++ b/intern/cycles/blender/addon/properties.py
+@@ -67,6 +67,7 @@ enum_panorama_types = (
+     ('FISHEYE_EQUISOLID', "Fisheye Equisolid",
+                           "Similar to most fisheye modern lens, takes sensor dimensions into consideration"),
+     ('MIRRORBALL', "Mirror Ball", "Uses the mirror ball mapping"),
++    ('OMNI', "Omnidirectional", "Uses Scaramuzza omnidirectional camera model"),
+     )
+ 
+ enum_curve_primitives = (
+@@ -630,6 +631,61 @@ class CyclesCameraSettings(bpy.types.PropertyGroup):
+                 subtype='ANGLE',
+                 default=math.pi,
+                 )
++        cls.a0 = FloatProperty(
++                name="a0",
++                description="a0",
++                default=-2.108794e+02,
++                )
++        cls.a1 = FloatProperty(
++                name="a1",
++                description="a1",
++                default=0.0,
++                )
++        cls.a2 = FloatProperty(
++                name="a2",
++                description="a2",
++                default=1.971697e-03,
++                )
++        cls.a3 = FloatProperty(
++                name="a3",
++                description="a3",
++                default=-2.633567e-06,
++                )
++        cls.a4 = FloatProperty(
++                name="a4",
++                description="a4",
++                default=1.266556e-08,
++                )
++        cls.shift_cx = FloatProperty(
++                name="shift_cx",
++                description="shift_cx",
++                default=-21.763489,
++                )
++        cls.shift_cy = FloatProperty(
++                name="shift_cy",
++                description="shift_cy",
++                default=9.460006,
++                )
++        cls.c = FloatProperty(
++                name="c",
++                description="c",
++                default=0.999609,
++                )
++        cls.d = FloatProperty(
++                name="d",
++                description="d",
++                default=-0.000222,
++                )
++        cls.e = FloatProperty(
++                name="e",
++                description="e",
++                default=-0.000116,
++                )
++        cls.radius = FloatProperty(
++                name="radius",
++                description="radius",
++                default=0.0,
++                )
+ 
+     @classmethod
+     def unregister(cls):
+diff --git a/intern/cycles/blender/blender_camera.cpp b/intern/cycles/blender/blender_camera.cpp
+index 0a79bfb..3dfd8e6 100644
+--- a/intern/cycles/blender/blender_camera.cpp
++++ b/intern/cycles/blender/blender_camera.cpp
+@@ -57,6 +57,17 @@ struct BlenderCamera {
+ 	float latitude_max;
+ 	float longitude_min;
+ 	float longitude_max;
++  float a0;
++  float a1;
++  float a2;
++  float a3;
++  float a4;
++  float c;
++  float d;
++  float e;
++	float shift_cx;
++	float shift_cy;
++	float radius;
+ 
+ 	enum { AUTO, HORIZONTAL, VERTICAL } sensor_fit;
+ 	float sensor_width;
+@@ -151,6 +162,9 @@ static void blender_camera_from_object(BlenderCamera *bcam, BL::RenderEngine b_e
+ 			case 3:
+ 				bcam->panorama_type = PANORAMA_MIRRORBALL;
+ 				break;
++      case 4:
++        bcam->panorama_type = PANORAMA_OMNI;
++        break;
+ 			case 0:
+ 			default:
+ 				bcam->panorama_type = PANORAMA_EQUIRECTANGULAR;
+@@ -163,6 +177,17 @@ static void blender_camera_from_object(BlenderCamera *bcam, BL::RenderEngine b_e
+ 		bcam->latitude_max = RNA_float_get(&ccamera, "latitude_max");
+ 		bcam->longitude_min = RNA_float_get(&ccamera, "longitude_min");
+ 		bcam->longitude_max = RNA_float_get(&ccamera, "longitude_max");
++    bcam->a0 = RNA_float_get(&ccamera, "a0");
++    bcam->a1 = RNA_float_get(&ccamera, "a1");
++    bcam->a2 = RNA_float_get(&ccamera, "a2");
++    bcam->a3 = RNA_float_get(&ccamera, "a3");
++    bcam->a4 = RNA_float_get(&ccamera, "a4");
++    bcam->c = RNA_float_get(&ccamera, "c");
++    bcam->d = RNA_float_get(&ccamera, "d");
++    bcam->e = RNA_float_get(&ccamera, "e");
++		bcam->shift_cx = RNA_float_get(&ccamera, "shift_cx");
++		bcam->shift_cy = RNA_float_get(&ccamera, "shift_cy");
++		bcam->radius = RNA_float_get(&ccamera, "radius");
+ 
+ 		bcam->ortho_scale = b_camera.ortho_scale();
+ 
+@@ -388,6 +413,18 @@ static void blender_camera_sync(Camera *cam, BlenderCamera *bcam, int width, int
+ 	cam->longitude_min = bcam->longitude_min;
+ 	cam->longitude_max = bcam->longitude_max;
+ 
++  cam->a0 = bcam->a0;
++  cam->a1 = bcam->a1;
++  cam->a2 = bcam->a2;
++  cam->a3 = bcam->a3;
++  cam->a4 = bcam->a4;
++  cam->c = bcam->c;
++  cam->d = bcam->d;
++  cam->e = bcam->e;
++	cam->shift_cx = bcam->shift_cx;
++	cam->shift_cy = bcam->shift_cy;
++	cam->radius = bcam->radius;
++
+ 	/* anamorphic lens bokeh */
+ 	cam->aperture_ratio = bcam->aperture_ratio;
+ 
+diff --git a/intern/cycles/kernel/kernel_projection.h b/intern/cycles/kernel/kernel_projection.h
+index 62922df..c7fc63a 100644
+--- a/intern/cycles/kernel/kernel_projection.h
++++ b/intern/cycles/kernel/kernel_projection.h
+@@ -5,7 +5,7 @@
+  * All Rights Reserved.
+  *
+  * Modifications Copyright 2011, Blender Foundation.
+- * 
++ *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions are
+  * met:
+@@ -148,12 +148,66 @@ ccl_device float3 fisheye_equisolid_to_direction(float u, float v, float lens, f
+ 	if(v < 0.0f) phi = -phi;
+ 
+ 	return make_float3(
+-		 cosf(theta),
+-		 -cosf(phi)*sinf(theta),
++ 		 cosf(theta),
++ 		 -cosf(phi)*sinf(theta),
+ 		 sinf(phi)*sinf(theta)
+ 	);
+ }
+ 
++/* Omnidirectional Model <-> Cartesian direction */
++
++ccl_device float3 omni_to_direction(float u,
++	float v,
++	float imageWidth,
++	float imageHeight,
++	float radiusPixels,
++	float a0,
++	float a1,
++	float a2,
++	float a3,
++	float a4,
++	float kC,
++	float kD,
++	float kE,
++	float cx,
++	float cy,
++	float invDetAffine) {
++	// scale coordinates and shift center
++	u = u * imageWidth - cx;
++	v = imageHeight * (1.f - v) - cy;
++
++	if(radiusPixels > 0.f && u*u + v*v > radiusPixels*radiusPixels)
++		return make_float3(0.f, 0.f, 0.f);
++
++	// inverse affine transformation
++	const float affine_u = invDetAffine * (kC * u - kE * v);
++	const float affine_v = invDetAffine * (-kD * u + v);
++
++	// ray z-direction
++	const float rho2 = affine_u * affine_u + affine_v * affine_v;
++	const float rho = sqrtf(rho2);
++	const float z = a0 + a1*rho + a2*rho2 + a3*rho2*rho + a4*rho2*rho2;
++	const float invnorm = 1.f / sqrtf(affine_u*affine_u + affine_v*affine_v + z*z);
++
++	return make_float3(
++		 - invnorm * z,
++		 - invnorm * affine_u,
++		 - invnorm * affine_v);
++}
++
++ccl_device float2 direction_to_omni(float3 dir,
++	float imageWidth,
++	float imageHeight,
++	float kC,
++	float kD,
++	float kE,
++	float cx,
++	float cy)
++{
++	// Not implemented yet.
++	return make_float2(0.0f, 0.0f);
++}
++
+ /* Mirror Ball <-> Cartesion direction */
+ 
+ ccl_device float3 mirrorball_to_direction(float u, float v)
+@@ -193,32 +247,58 @@ ccl_device float2 direction_to_mirrorball(float3 dir)
+ ccl_device float3 panorama_to_direction(KernelGlobals *kg, float u, float v)
+ {
+ 	switch(kernel_data.cam.panorama_type) {
+-		case PANORAMA_EQUIRECTANGULAR:
+-			return equirectangular_range_to_direction(u, v, kernel_data.cam.equirectangular_range);
+-		case PANORAMA_MIRRORBALL:
+-			return mirrorball_to_direction(u, v);
+-		case PANORAMA_FISHEYE_EQUIDISTANT:
+-			return fisheye_to_direction(u, v, kernel_data.cam.fisheye_fov);
+-		case PANORAMA_FISHEYE_EQUISOLID:
+-		default:
+-			return fisheye_equisolid_to_direction(u, v, kernel_data.cam.fisheye_lens,
+-				kernel_data.cam.fisheye_fov, kernel_data.cam.sensorwidth, kernel_data.cam.sensorheight);
++	case PANORAMA_OMNI:
++		return omni_to_direction(u,
++														 v,
++														 kernel_data.cam.width,
++														 kernel_data.cam.height,
++														 kernel_data.cam.radius * kernel_data.cam.height / 2.f,
++														 kernel_data.cam.a0,
++														 kernel_data.cam.a1,
++														 kernel_data.cam.a2,
++														 kernel_data.cam.a3,
++														 kernel_data.cam.a4,
++														 kernel_data.cam.c,
++														 kernel_data.cam.d,
++														 kernel_data.cam.e,
++														 kernel_data.cam.width / 2.f + kernel_data.cam.shift_cx,
++														 kernel_data.cam.height / 2.f + kernel_data.cam.shift_cy,
++														 1.f / (kernel_data.cam.c - kernel_data.cam.d*kernel_data.cam.e));
++	case PANORAMA_EQUIRECTANGULAR:
++		return equirectangular_range_to_direction(u, v, kernel_data.cam.equirectangular_range);
++	case PANORAMA_MIRRORBALL:
++		return mirrorball_to_direction(u, v);
++	case PANORAMA_FISHEYE_EQUIDISTANT:
++		return fisheye_to_direction(u, v, kernel_data.cam.fisheye_fov);
++	case PANORAMA_FISHEYE_EQUISOLID:
++	default:
++		return fisheye_equisolid_to_direction(u, v, kernel_data.cam.fisheye_lens,
++																					kernel_data.cam.fisheye_fov, kernel_data.cam.sensorwidth, kernel_data.cam.sensorheight);
+ 	}
+ }
+ 
+ ccl_device float2 direction_to_panorama(KernelGlobals *kg, float3 dir)
+ {
+ 	switch(kernel_data.cam.panorama_type) {
+-		case PANORAMA_EQUIRECTANGULAR:
+-			return direction_to_equirectangular_range(dir, kernel_data.cam.equirectangular_range);
+-		case PANORAMA_MIRRORBALL:
+-			return direction_to_mirrorball(dir);
+-		case PANORAMA_FISHEYE_EQUIDISTANT:
+-			return direction_to_fisheye(dir, kernel_data.cam.fisheye_fov);
+-		case PANORAMA_FISHEYE_EQUISOLID:
+-		default:
+-			return direction_to_fisheye_equisolid(dir, kernel_data.cam.fisheye_lens,
+-				kernel_data.cam.sensorwidth, kernel_data.cam.sensorheight);
++	case PANORAMA_OMNI:
++		return direction_to_omni(dir,
++														 kernel_data.cam.width,
++														 kernel_data.cam.height,
++														 kernel_data.cam.c,
++														 kernel_data.cam.d,
++														 kernel_data.cam.e,
++														 kernel_data.cam.width / 2.f + kernel_data.cam.shift_cx,
++														 kernel_data.cam.height / 2.f + kernel_data.cam.shift_cy);
++	case PANORAMA_EQUIRECTANGULAR:
++		return direction_to_equirectangular_range(dir, kernel_data.cam.equirectangular_range);
++	case PANORAMA_MIRRORBALL:
++		return direction_to_mirrorball(dir);
++	case PANORAMA_FISHEYE_EQUIDISTANT:
++		return direction_to_fisheye(dir, kernel_data.cam.fisheye_fov);
++	case PANORAMA_FISHEYE_EQUISOLID:
++	default:
++		return direction_to_fisheye_equisolid(dir, kernel_data.cam.fisheye_lens,
++																					kernel_data.cam.sensorwidth, kernel_data.cam.sensorheight);
+ 	}
+ }
+ 
+diff --git a/intern/cycles/kernel/kernel_types.h b/intern/cycles/kernel/kernel_types.h
+index acd2f5d..d2fd26f 100644
+--- a/intern/cycles/kernel/kernel_types.h
++++ b/intern/cycles/kernel/kernel_types.h
+@@ -454,7 +454,8 @@ enum PanoramaType {
+ 	PANORAMA_EQUIRECTANGULAR,
+ 	PANORAMA_MIRRORBALL,
+ 	PANORAMA_FISHEYE_EQUIDISTANT,
+-	PANORAMA_FISHEYE_EQUISOLID
++	PANORAMA_FISHEYE_EQUISOLID,
++	PANORAMA_OMNI
+ };
+ 
+ /* Differential */
+@@ -759,6 +760,17 @@ typedef struct KernelCamera {
+ 	int panorama_type;
+ 	float fisheye_fov;
+ 	float fisheye_lens;
++  float a0;
++  float a1;
++  float a2;
++  float a3;
++  float a4;
++  float c;
++  float d;
++  float e;
++	float shift_cx;
++	float shift_cy;
++	float radius;
+ 	float4 equirectangular_range;
+ 
+ 	/* matrices */
+diff --git a/intern/cycles/render/camera.cpp b/intern/cycles/render/camera.cpp
+index df2a1d3..9671530 100644
+--- a/intern/cycles/render/camera.cpp
++++ b/intern/cycles/render/camera.cpp
+@@ -284,6 +284,17 @@ void Camera::device_update(Device *device, DeviceScene *dscene, Scene *scene)
+ 	kcam->panorama_type = panorama_type;
+ 	kcam->fisheye_fov = fisheye_fov;
+ 	kcam->fisheye_lens = fisheye_lens;
++  kcam->a0 = a0;
++  kcam->a1 = a1;
++  kcam->a2 = a2;
++  kcam->a3 = a3;
++  kcam->a4 = a4;
++  kcam->c = c;
++  kcam->d = d;
++  kcam->e = e;
++	kcam->shift_cx = shift_cx;
++	kcam->shift_cy = shift_cy;
++	kcam->radius = radius;
+ 	kcam->equirectangular_range = make_float4(longitude_min - longitude_max, -longitude_min,
+ 	                                          latitude_min -  latitude_max, -latitude_min + M_PI_2_F);
+ 
+@@ -361,10 +372,21 @@ bool Camera::modified(const Camera& cam)
+ 		(panorama_type == cam.panorama_type) &&
+ 		(fisheye_fov == cam.fisheye_fov) &&
+ 		(fisheye_lens == cam.fisheye_lens) &&
++    (a0 == cam.a0) &&
++    (a1 == cam.a1) &&
++    (a2 == cam.a2) &&
++    (a3 == cam.a3) &&
++    (a4 == cam.a4) &&
++    (c == cam.c) &&
++    (d == cam.d) &&
++    (e == cam.e) &&
++		(shift_cx == cam.shift_cx) &&
++		(shift_cy == cam.shift_cy) &&
++		(radius == cam.radius) &&
+ 		(latitude_min == cam.latitude_min) &&
+ 		(latitude_max == cam.latitude_max) &&
+ 		(longitude_min == cam.longitude_min) &&
+-		(longitude_max == cam.longitude_max));
++    (longitude_max == cam.longitude_max));
+ }
+ 
+ bool Camera::motion_modified(const Camera& cam)
+diff --git a/intern/cycles/render/camera.h b/intern/cycles/render/camera.h
+index 1bedb05..d87e523 100644
+--- a/intern/cycles/render/camera.h
++++ b/intern/cycles/render/camera.h
+@@ -57,6 +57,17 @@ public:
+ 	float latitude_max;
+ 	float longitude_min;
+ 	float longitude_max;
++  float a0;
++  float a1;
++  float a2;
++  float a3;
++  float a4;
++  float c;
++  float d;
++  float e;
++	float shift_cx;
++	float shift_cy;
++	float radius;
+ 
+ 	/* anamorphic lens bokeh */
+ 	float aperture_ratio;
+diff --git a/release/scripts/addons b/release/scripts/addons
+index 3fc5b82..9a3a63d 160000
+--- a/release/scripts/addons
++++ b/release/scripts/addons
+@@ -1 +1 @@
+-Subproject commit 3fc5b82c6bdba2f9c954fbf497621b9bb794a1bc
++Subproject commit 9a3a63d01d0f563f6d2fcda55df6494e48f231fd
+diff --git a/release/scripts/addons_contrib b/release/scripts/addons_contrib
+index cf842d8..e31cec5 160000
+--- a/release/scripts/addons_contrib
++++ b/release/scripts/addons_contrib
+@@ -1 +1 @@
+-Subproject commit cf842d8bb7b0033ca4fa99f7ebedcbd3810fd274
++Subproject commit e31cec5bf243f00441c7dad7a775ec4722f829d3
+diff --git a/release/scripts/startup/bl_ui/properties_data_camera.py b/release/scripts/startup/bl_ui/properties_data_camera.py
+index 108e8bd..58b1880 100644
+--- a/release/scripts/startup/bl_ui/properties_data_camera.py
++++ b/release/scripts/startup/bl_ui/properties_data_camera.py
+@@ -106,6 +106,27 @@ class DATA_PT_lens(CameraButtonsPanel, Panel):
+                     row = layout.row()
+                     row.prop(ccam, "fisheye_lens", text="Lens")
+                     row.prop(ccam, "fisheye_fov")
++                elif ccam.panorama_type == 'OMNI':
++                    row = layout.row()
++                    sub = row.column(align=True)
++                    sub.label(text="Polynomial:")
++                    sub.prop(ccam, "a0")
++                    sub.prop(ccam, "a1")
++                    sub.prop(ccam, "a2")
++                    sub.prop(ccam, "a3")
++                    sub.prop(ccam, "a4")
++                    sub = row.column(align=True)
++                    sub.label(text="Shift (pixels):")
++                    sub.prop(ccam, "shift_cx", text="X")
++                    sub.prop(ccam, "shift_cy", text="Y")
++                    sub = row.column(align=True)
++                    sub.label(text="Affine parameters:")
++                    sub.prop(ccam, "c")
++                    sub.prop(ccam, "d")
++                    sub.prop(ccam, "e")
++                    sub = row.column(align=True)
++                    sub.label(text="Radius (scale factor of half-height):")
++                    sub.prop(ccam, "radius", text="Radius")
+                 elif ccam.panorama_type == 'EQUIRECTANGULAR':
+                     row = layout.row()
+                     sub = row.column(align=True)
+@@ -114,6 +135,11 @@ class DATA_PT_lens(CameraButtonsPanel, Panel):
+                     sub = row.column(align=True)
+                     sub.prop(ccam, "longitude_min")
+                     sub.prop(ccam, "longitude_max")
++                if not ccam.panorama_type == 'OMNI':
++                    col = split.column(align=True)
++                    col.label(text="Shift:")
++                    col.prop(cam, "shift_x", text="X")
++                    col.prop(cam, "shift_y", text="Y")
+             elif engine == 'BLENDER_RENDER':
+                 row = col.row()
+                 if cam.lens_unit == 'MILLIMETERS':
+@@ -123,12 +149,6 @@ class DATA_PT_lens(CameraButtonsPanel, Panel):
+                 row.prop(cam, "lens_unit", text="")
+ 
+         split = layout.split()
+-
+-        col = split.column(align=True)
+-        col.label(text="Shift:")
+-        col.prop(cam, "shift_x", text="X")
+-        col.prop(cam, "shift_y", text="Y")
+-
+         col = split.column(align=True)
+         col.label(text="Clipping:")
+         col.prop(cam, "clip_start", text="Start")
+-- 
+2.1.4
+

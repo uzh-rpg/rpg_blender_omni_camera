@@ -1,0 +1,22 @@
+Image size
+
+width: 640px
+height: 480px
+
+Polynomial
+
+a0: -70.25584688010954
+a1: 0
+a2: 0.0005433216164761568
+a3: 2.102936744599082e-05
+a4: -8.54310806364036e-09
+
+Shift
+X: 0
+Y: 0
+
+Affine parameters:
+
+c: 1
+d: 0
+e: 0

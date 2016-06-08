@@ -45,3 +45,7 @@ Warning: one set of parameters is valid for a given image size.
 ## Known issues
 
 * Using motion blur using the omnidirectional camera leads to incorrect results
+
+## License
+
+This code is released under the [Creative Commons license (CC BY-NC-SA 3.0)](http://creativecommons.org/licenses/by-nc-sa/3.0/), which is free for non-commercial use (including research).
